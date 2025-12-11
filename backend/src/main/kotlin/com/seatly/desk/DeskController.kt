@@ -74,6 +74,25 @@ open class DeskController(
     val responseBody = BookingResponse.from(created)
     return HttpResponse.created(responseBody)
   }
+
+  @Post("{deskId}/bookings/recurring")
+  @Secured(SecurityRule.IS_AUTHENTICATED)
+  open fun createRecurringBooking(
+    authentication: Authentication,
+    @PathVariable deskId: Long,
+    @Body @Valid request: CreateRecurringBookingRequest,
+  ): HttpResponse<List<BookingResponse>> {
+    val created =
+      deskManager.createRecurringBooking(
+        command =
+          request.toCommand(
+            deskId = deskId,
+            userId = authentication.name.toLong(),
+          ),
+      )
+    val responseBody = created.map { BookingResponse.from(it) }
+    return HttpResponse.created(responseBody)
+  }
 }
 
 @Serdeable
@@ -137,6 +156,28 @@ data class CreateBookingRequest(
       userId = userId,
       startAt = startAt,
       endAt = endAt,
+    )
+}
+
+@Serdeable
+data class CreateRecurringBookingRequest(
+  @field:NotNull
+  val startAt: LocalDateTime,
+  @field:NotNull
+  val endAt: LocalDateTime,
+  @field:NotNull
+  val recurrenceEndDate: java.time.LocalDate,
+) {
+  fun toCommand(
+    deskId: Long,
+    userId: Long,
+  ): CreateRecurringBookingCommand =
+    CreateRecurringBookingCommand(
+      deskId = deskId,
+      userId = userId,
+      startAt = startAt,
+      endAt = endAt,
+      recurrenceEndDate = recurrenceEndDate,
     )
 }
 

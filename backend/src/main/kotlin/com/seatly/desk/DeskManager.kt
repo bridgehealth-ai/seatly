@@ -1,11 +1,14 @@
 package com.seatly.desk
 
 import jakarta.inject.Singleton
+import jakarta.transaction.Transactional
+import java.time.DayOfWeek
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.temporal.ChronoUnit
 
 @Singleton
-class DeskManager(
+open class DeskManager(
   private val deskRepository: DeskRepository,
   private val bookingRepository: BookingRepository,
 ) {
@@ -86,7 +89,7 @@ class DeskManager(
     val normalizedEnd = command.endAt.truncatedTo(ChronoUnit.MINUTES)
 
     if (bookingRepository.existsOverlappingBooking(command.deskId, normalizedStart, normalizedEnd)) {
-      throw IllegalStateException("Desk is already booked for the given time range")
+      throw IllegalStateException("Date and time selected is unavailable")
     }
 
     val booking =
@@ -100,6 +103,72 @@ class DeskManager(
     val savedBooking = bookingRepository.save(booking)
     return BookingDto.from(savedBooking)
   }
+
+  @Transactional
+  open fun createRecurringBooking(command: CreateRecurringBookingCommand): List<BookingDto> {
+    require(command.startAt.isBefore(command.endAt)) {
+      "startAt must be before endAt"
+    }
+
+    require(!command.recurrenceEndDate.isBefore(command.startAt.toLocalDate())) {
+      "recurrenceEndDate must not be before startAt date"
+    }
+
+    val normalizedStart = command.startAt.truncatedTo(ChronoUnit.MINUTES)
+    val normalizedEnd = command.endAt.truncatedTo(ChronoUnit.MINUTES)
+    
+    // Calculate all recurring dates
+    val recurringDates = calculateRecurringDates(
+      startDate = normalizedStart.toLocalDate(),
+      endDate = command.recurrenceEndDate,
+      dayOfWeek = normalizedStart.dayOfWeek
+    )
+
+    // Generate all booking time ranges
+    val bookingTimeRanges = recurringDates.map { date ->
+      val bookingStart = LocalDateTime.of(date, normalizedStart.toLocalTime())
+      val bookingEnd = LocalDateTime.of(date, normalizedEnd.toLocalTime())
+      bookingStart to bookingEnd
+    }
+
+    // Validate ALL bookings for conflicts before creating any
+    bookingTimeRanges.forEach { (start, end) ->
+      if (bookingRepository.existsOverlappingBooking(command.deskId, start, end)) {
+        throw IllegalStateException("Date and time selected is unavailable")
+      }
+    }
+
+    // Create all bookings
+    val createdBookings = bookingTimeRanges.map { (start, end) ->
+      val booking = Booking(
+        deskId = command.deskId,
+        userId = command.userId,
+        startAt = start,
+        endAt = end,
+      )
+      bookingRepository.save(booking)
+    }
+
+    return createdBookings.map { BookingDto.from(it) }
+  }
+}
+
+private fun calculateRecurringDates(
+  startDate: LocalDate,
+  endDate: LocalDate,
+  dayOfWeek: DayOfWeek
+): List<LocalDate> {
+  val dates = mutableListOf<LocalDate>()
+  var currentDate = startDate
+  
+  while (!currentDate.isAfter(endDate)) {
+    if (currentDate.dayOfWeek == dayOfWeek) {
+      dates.add(currentDate)
+    }
+    currentDate = currentDate.plusDays(1)
+  }
+  
+  return dates
 }
 
 private fun LocalDateTime.roundDownToHalfHour(): LocalDateTime {
@@ -152,6 +221,14 @@ data class CreateBookingCommand(
   val userId: Long,
   val startAt: LocalDateTime,
   val endAt: LocalDateTime,
+)
+
+data class CreateRecurringBookingCommand(
+  val deskId: Long,
+  val userId: Long,
+  val startAt: LocalDateTime,
+  val endAt: LocalDateTime,
+  val recurrenceEndDate: LocalDate,
 )
 
 data class BookingDto(

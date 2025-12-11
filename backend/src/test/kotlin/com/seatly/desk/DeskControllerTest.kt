@@ -19,6 +19,8 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.time.DayOfWeek
+import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.temporal.ChronoUnit
 
@@ -299,5 +301,120 @@ class DeskControllerTest {
     val otherSlots = availability.filter { it != bookedSlot }
     assertEquals(5, otherSlots.size)
     assertTrue(otherSlots.all { it.status == AvailabilityStatus.AVAILABLE })
+  }
+
+  @Test
+  fun `should create recurring booking successfully for multiple weeks`() {
+    val desk: DeskResponse =
+      createDesk(
+        client = client,
+        authToken = authToken,
+        name = "Recurring Desk",
+        location = "Floor 3",
+      )
+    val deskId = desk.id!!
+
+    // Find next Monday at 2 PM
+    var startDate = LocalDate.now().plusDays(1)
+    while (startDate.dayOfWeek != DayOfWeek.MONDAY) {
+      startDate = startDate.plusDays(1)
+    }
+    
+    val firstBookingStart = LocalDateTime.of(startDate, java.time.LocalTime.of(14, 0))
+    val firstBookingEnd = firstBookingStart.plusMinutes(30)
+    val recurrenceEndDate = startDate.plusWeeks(2) // 3 Mondays total
+
+    val createRecurringRequest =
+      CreateRecurringBookingRequest(
+        startAt = firstBookingStart,
+        endAt = firstBookingEnd,
+        recurrenceEndDate = recurrenceEndDate,
+      )
+
+    val response =
+      client.toBlocking().exchange(
+        HttpRequest
+          .POST("desks/$deskId/bookings/recurring", createRecurringRequest)
+          .bearerAuth(authToken),
+        Argument.listOf(BookingResponse::class.java),
+      )
+
+    assertEquals(HttpStatus.CREATED, response.status)
+    val bookings = response.body()
+    assertNotNull(bookings)
+    assertEquals(3, bookings!!.size)
+
+    // Verify all bookings are on Mondays at the same time
+    bookings.forEach { booking ->
+      assertEquals(deskId, booking.deskId)
+      assertEquals(authUser.id, booking.userId)
+      assertEquals(DayOfWeek.MONDAY, booking.startAt.dayOfWeek)
+      assertEquals(14, booking.startAt.hour)
+      assertEquals(0, booking.startAt.minute)
+      assertEquals(30, java.time.Duration.between(booking.startAt, booking.endAt).toMinutes())
+    }
+  }
+
+  @Test
+  fun `should validate recurring booking dates`() {
+    val desk: DeskResponse =
+      createDesk(
+        client = client,
+        authToken = authToken,
+        name = "Validation Desk",
+        location = "Floor 4",
+      )
+    val deskId = desk.id!!
+
+    // Find next Monday at 3 PM
+    var startDate = LocalDate.now().plusDays(1)
+    while (startDate.dayOfWeek != DayOfWeek.MONDAY) {
+      startDate = startDate.plusDays(1)
+    }
+
+    val bookingStart = LocalDateTime.of(startDate, java.time.LocalTime.of(15, 0))
+    val bookingEnd = bookingStart.plusMinutes(30)
+
+    // Try to create recurring booking with valid dates
+    val createRecurringRequest =
+      CreateRecurringBookingRequest(
+        startAt = bookingStart,
+        endAt = bookingEnd,
+        recurrenceEndDate = startDate.plusWeeks(1), // 2 weeks total
+      )
+
+    val response =
+      client.toBlocking().exchange(
+        HttpRequest
+          .POST("desks/$deskId/bookings/recurring", createRecurringRequest)
+          .bearerAuth(authToken),
+        Argument.listOf(BookingResponse::class.java),
+      )
+
+    assertEquals(HttpStatus.CREATED, response.status)
+    val bookings = response.body()
+    assertNotNull(bookings)
+    assertEquals(2, bookings!!.size) // 2 Mondays
+  }
+
+  @Test
+  fun `should not allow creating recurring booking without token`() {
+    val now = LocalDateTime.now().plusHours(1)
+    val createRequest =
+      CreateRecurringBookingRequest(
+        startAt = now,
+        endAt = now.plusHours(1),
+        recurrenceEndDate = LocalDate.now().plusWeeks(2),
+      )
+
+    val exception =
+      assertThrows(HttpClientResponseException::class.java) {
+        client.toBlocking().exchange(
+          HttpRequest.POST("/desks/1/bookings/recurring", createRequest),
+          Argument.listOf(BookingResponse::class.java),
+        )
+      }
+
+    assertEquals(HttpStatus.UNAUTHORIZED, exception.status)
   }
 }
