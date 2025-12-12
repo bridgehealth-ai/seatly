@@ -81,7 +81,7 @@ class DeskManager(
     require(command.startAt.isBefore(command.endAt)) {
       "startAt must be before endAt"
     }
-
+    
     val normalizedStart = command.startAt.truncatedTo(ChronoUnit.MINUTES)
     val normalizedEnd = command.endAt.truncatedTo(ChronoUnit.MINUTES)
 
@@ -99,6 +99,32 @@ class DeskManager(
 
     val savedBooking = bookingRepository.save(booking)
     return BookingDto.from(savedBooking)
+
+  }
+
+  public fun createRecurringBookings(command: CreateBookingCommand): List<BookingDto> {
+    require(command.startAt.isBefore(command.endAt)) {
+      "startAt must be before endAt"
+    }
+    require(command.recurrence_type == "WEEKLY") {
+      "Only weekly recurrence is supported"
+    }
+    val normalizedStart = command.startAt.truncatedTo(ChronoUnit.MINUTES)
+    val normalizedEnd = command.endAt.truncatedTo(ChronoUnit.MINUTES)
+
+    val occurrences = (0 until command.duration).map { weekIndex ->
+        val occurrenceStart = normalizedStart.plusWeeks(weekIndex.toLong())
+        val occurrenceEnd = normalizedEnd.plusWeeks(weekIndex.toLong())
+
+        if (bookingRepository.existsOverlappingBooking(command.deskId, occurrenceStart, occurrenceEnd)) {
+            throw IllegalStateException("Conflict for weekly occurrence on ${occurrenceStart.toLocalDate()}")
+        }
+
+        Booking(deskId = command.deskId, userId = command.userId, startAt = occurrenceStart, endAt = occurrenceEnd)
+    }
+
+    val savedBookings = bookingRepository.saveAll(occurrences)
+    return savedBookings.map { BookingDto.from(it) }
   }
 }
 
@@ -152,6 +178,8 @@ data class CreateBookingCommand(
   val userId: Long,
   val startAt: LocalDateTime,
   val endAt: LocalDateTime,
+  val duration: Long,
+  val recurrence_type: String?,
 )
 
 data class BookingDto(
