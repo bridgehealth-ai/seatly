@@ -1,11 +1,14 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import {
   type AvailabilitySlot,
   useCreateBookingMutation,
+  useCreateRecurringBookingMutation,
+  fetchDeskAvailability,
   useDeskAvailabilityQuery,
 } from "@/features/desks/api/deskBookings";
-import type {Desk} from "@/features/desks/api/desks";
-import {useQueryClient} from "@tanstack/react-query";
+import type { Desk } from "@/features/desks/api/desks";
+import { useQueryClient } from "@tanstack/react-query";
+import { useAuth } from "@/features/auth/AuthContext";
 
 type DeskBookingModalProps = {
   desk: Desk & { id: number };
@@ -23,7 +26,6 @@ function toLocalDateTimeString(date: Date): string {
   const minutes = pad(date.getMinutes());
   const seconds = pad(date.getSeconds());
 
-  // Local datetime without timezone/offset, matches Micronaut LocalDateTime
   return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}`;
 }
 
@@ -49,12 +51,18 @@ function formatTimeRange(slot: AvailabilitySlot): string {
 }
 
 export const DeskBookingModal: React.FC<DeskBookingModalProps> = ({
-                                                                    desk,
-                                                                    isOpen,
-                                                                    onClose,
-                                                                  }) => {
+  desk,
+  isOpen,
+  onClose,
+}) => {
   const queryClient = useQueryClient();
   const [selectedDate, setSelectedDate] = React.useState<Date>(() => new Date());
+  const [isRecurring, setIsRecurring] = useState(false);
+  const [recurrenceDuration, setRecurrenceDuration] = useState(1);
+  const [recurrenceStartDate, setRecurrenceStartDate] = useState<Date>(() => new Date());
+  const [availabilitySlots, setAvailabilitySlots] = useState<AvailabilitySlot[][]>([]);
+  const [bookingError, setBookingError] = useState<string | null>(null);
+  const [selectedSlot, setSelectedSlot] = useState<AvailabilitySlot | null>(null);
 
   const start = React.useMemo(
     () =>
@@ -65,9 +73,9 @@ export const DeskBookingModal: React.FC<DeskBookingModalProps> = ({
         9,
         0,
         0,
-        0,
+        0
       ),
-    [selectedDate],
+    [selectedDate]
   );
 
   const end = React.useMemo(
@@ -79,26 +87,30 @@ export const DeskBookingModal: React.FC<DeskBookingModalProps> = ({
         17,
         0,
         0,
-        0,
+        0
       ),
-    [selectedDate],
+    [selectedDate]
   );
 
   const startAt = toLocalDateTimeString(start);
   const endAt = toLocalDateTimeString(end);
 
-  const {
-    data: availability,
-    isLoading,
-    isError,
-    error,
-  } = useDeskAvailabilityQuery(desk.id, startAt, endAt);
-  
+  const { accessToken } = useAuth();
+
+  const { data: availability } =
+    useDeskAvailabilityQuery(desk.id, startAt, endAt);
+
+  useEffect(() => {
+    const allSlots: AvailabilitySlot[][] = [];
+    if (availability) allSlots.push(availability);
+    setAvailabilitySlots(allSlots);
+  }, [availability]);
+
   const bookingMutation = useCreateBookingMutation();
-  const [bookingError, setBookingError] = React.useState<string | null>(null);
+  const recurringBookingMutation = useCreateRecurringBookingMutation();
 
   const handleBackgroundClick: React.MouseEventHandler<HTMLDivElement> = (e) => {
-    if (bookingMutation.isPending) return;
+    if (bookingMutation.isPending || recurringBookingMutation.isPending) return;
     e.stopPropagation();
     onClose();
   };
@@ -110,12 +122,12 @@ export const DeskBookingModal: React.FC<DeskBookingModalProps> = ({
   const handleBookSlot = async (slot: AvailabilitySlot) => {
     setBookingError(null);
     try {
+      
       await bookingMutation.mutateAsync({
         deskId: desk.id,
         startAt: slot.startAt,
         endAt: slot.endAt,
       });
-
       // Refresh availability after successful booking
       await queryClient.invalidateQueries({
         queryKey: ["deskAvailability", desk.id, startAt, endAt],
@@ -132,12 +144,121 @@ export const DeskBookingModal: React.FC<DeskBookingModalProps> = ({
     const value = e.target.value; // "yyyy-MM-dd"
     if (!value) return;
     const [year, month, day] = value.split("-").map(Number);
-    // Keep local time; hours/mins defined by start/end memos.
     const newDate = new Date(year, (month ?? 1) - 1, day ?? 1);
     if (!Number.isNaN(newDate.getTime())) {
       setSelectedDate(newDate);
+      setRecurrenceStartDate(newDate);
     }
   };
+
+  const handleRecurrenceChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setIsRecurring(e.target.checked);
+  };
+
+  const handleRecurrenceStartDateChange = (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    setRecurrenceStartDate(e.target.value);
+  };
+
+  const handleRecurrenceDurationChange = (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    setRecurrenceDuration(Number(e.target.value));
+  };
+
+  const handleSlotSelection = (slot: AvailabilitySlot) => {
+    setSelectedSlot(slot);
+  };
+
+  const handleRecurringBooking = async () => {
+    if (!selectedSlot) {
+      setBookingError("Please select a time slot.");
+      return;
+    }
+
+    setBookingError(null);
+    const recurrenceDates = [];
+    const startDate = new Date(recurrenceStartDate);
+
+    // Create recurrence dates for the next weeks
+    for (let i = 0; i < recurrenceDuration; i++) {
+      const nextWeekDate = new Date(startDate);
+      nextWeekDate.setDate(startDate.getDate() + 7 * i);
+      recurrenceDates.push(nextWeekDate.toISOString());
+    }
+
+    const recurrenceCount = recurrenceDuration;
+    try {
+      
+        const recurrenceData = {
+          deskId: desk.id,
+          recurrence: 'WEEKLY', 
+          duration: recurrenceCount,
+          startAt: selectedSlot.startAt,
+          endAt: selectedSlot.endAt,
+        };
+        await recurringBookingMutation.mutateAsync(recurrenceData);
+      
+
+      // Refresh availability after successful recurring booking
+      await queryClient.invalidateQueries({
+        queryKey: ["deskAvailability", desk.id, startAt, endAt],
+      });
+
+      onClose();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setBookingError(`Could not create recurring booking: ${message}`);
+    }
+  };
+  // Use useEffect to trigger fetching the availability for each recurrence start date
+  useEffect(() => {
+    if (!isRecurring || !recurrenceStartDate) return;
+
+    const recurrenceDates = [];
+    const startDate = new Date(recurrenceStartDate);
+
+    // Create recurrence dates for the next weeks
+    for (let i = 0; i < recurrenceDuration; i++) {
+      const nextWeekDate = new Date(startDate);
+      nextWeekDate.setDate(startDate.getDate() + 7 * i); 
+
+      recurrenceDates.push(nextWeekDate.toISOString());
+    }
+
+    // Fetch availability for each recurrence date using fetchDeskAvailability
+    const fetchAvailability = async () => {
+      const allSlots: AvailabilitySlot[][] = [];
+      for (const date of recurrenceDates) {
+        const startAt = new Date(date);
+        startAt.setHours(9, 0, 0, 0); 
+
+        const endAt = new Date(date);
+        endAt.setHours(17, 0, 0, 0); 
+
+        if (accessToken) {
+          try {
+            const availability = await fetchDeskAvailability(
+              accessToken,
+              desk.id,
+              toLocalDateTimeString(startAt),
+              toLocalDateTimeString(endAt)
+            );
+            allSlots.push(availability);
+          } catch (error) {
+            console.error("Error fetching availability:", error);
+          }
+        }
+      }
+      if (allSlots.length > 0) {
+        setSelectedSlot(allSlots[0][0])
+      }
+      setAvailabilitySlots(allSlots);
+    };
+
+    fetchAvailability();
+  }, [recurrenceStartDate, recurrenceDuration, isRecurring, desk.id, accessToken]);
 
   React.useEffect(() => {
     if (isOpen) {
@@ -172,7 +293,7 @@ export const DeskBookingModal: React.FC<DeskBookingModalProps> = ({
         }}
         onClick={handleInnerClick}
       >
-        <h2 style={{marginTop: 0, marginBottom: "0.75rem"}}>
+        <h2 style={{ marginTop: 0, marginBottom: "0.75rem" }}>
           Book desk: {desk.name}
         </h2>
 
@@ -185,7 +306,7 @@ export const DeskBookingModal: React.FC<DeskBookingModalProps> = ({
             fontSize: "0.9rem",
           }}
         >
-          <label htmlFor="booking-date" style={{whiteSpace: "nowrap"}}>
+          <label htmlFor="booking-date" style={{ whiteSpace: "nowrap" }}>
             Date:
           </label>
           <input
@@ -193,26 +314,82 @@ export const DeskBookingModal: React.FC<DeskBookingModalProps> = ({
             type="date"
             value={toDateInputValue(selectedDate)}
             onChange={handleDateChange}
-            style={{padding: "0.25rem 0.4rem"}}
+            style={{ padding: "0.25rem 0.4rem" }}
           />
-          <span style={{marginLeft: "auto"}}>
-            Showing availability 09:00 – 17:00
-          </span>
+          <span style={{ marginLeft: "auto" }}>Showing availability 09:00 – 17:00</span>
         </div>
 
-        {isLoading && <p>Loading availability...</p>}
+        <label style={{ display: "block", marginBottom: "0.5rem" }}>
+          Recurring Booking
+          <input
+            type="checkbox"
+            checked={isRecurring}
+            onChange={handleRecurrenceChange}
+          />
+        </label>
 
-        {isError && (
-          <p style={{color: "red"}}>
-            Failed to load availability: {error?.message}
-          </p>
+        {isRecurring && (
+          <div>
+            <label style={{ display: "block", marginBottom: "0.5rem" }}>
+              Start Date
+              <input
+                type="date"
+                value={recurrenceStartDate}
+                onChange={handleRecurrenceStartDateChange}
+              />
+            </label>
+            <label style={{ display: "block", marginBottom: "0.5rem" }}>
+              Duration (Weeks)
+              <input
+                type="number"
+                value={recurrenceDuration}
+                onChange={handleRecurrenceDurationChange}
+                min="1"
+              />
+            </label>
+
+            <label style={{ display: "block", marginBottom: "0.5rem" }}>
+              Select Time Slot
+              <select
+                onChange={(e) => {
+                  const selectedSlot = availabilitySlots.length > 0 && availabilitySlots[0].find(
+                    (slot) => slot.startAt === e.target.value
+                  );
+                  handleSlotSelection(selectedSlot);
+                }}
+              >
+                {availabilitySlots.length > 0 &&
+                  availabilitySlots[0].map((slot, index) => (
+                    <option key={index} value={slot.startAt}>
+                      {formatTimeRange(slot)}
+                    </option>
+                  ))}
+              </select>
+            </label>
+
+            <button
+              onClick={handleRecurringBooking}
+              disabled={!selectedSlot || recurringBookingMutation.isPending}
+              style={{
+                padding: "0.4rem 0.8rem",
+                cursor: selectedSlot && !recurringBookingMutation.isPending
+                  ? "pointer"
+                  : "not-allowed",
+              }}
+            >
+              Book Recurring Slot
+            </button>
+
+          </div>
         )}
 
-        {!isLoading && !isError && (!availability || availability.length === 0) && (
-          <p>No availability data for this period.</p>
+        {bookingError && (
+          <p style={{ color: "red", marginTop: "0.75rem" }}>{bookingError}</p>
         )}
 
-        {!isLoading && !isError && availability && availability.length > 0 && (
+        {availabilitySlots.length === 0 && <p>No availability data for this period.</p>}
+
+        {availabilitySlots.length > 0 && (
           <div
             style={{
               maxHeight: "300px",
@@ -229,92 +406,99 @@ export const DeskBookingModal: React.FC<DeskBookingModalProps> = ({
               }}
             >
               <thead>
-              <tr>
-                <th
-                  style={{
-                    textAlign: "left",
-                    padding: "0.5rem",
-                    borderBottom: "1px solid #ddd",
-                  }}
-                >
-                  Time
-                </th>
-                <th
-                  style={{
-                    textAlign: "left",
-                    padding: "0.5rem",
-                    borderBottom: "1px solid #ddd",
-                  }}
-                >
-                  Status
-                </th>
-                <th
-                  style={{
-                    textAlign: "right",
-                    padding: "0.5rem",
-                    borderBottom: "1px solid #ddd",
-                  }}
-                >
-                  Action
-                </th>
-              </tr>
+                <tr>
+                  <th
+                    style={{
+                      textAlign: "left",
+                      padding: "0.5rem",
+                      borderBottom: "1px solid #ddd",
+                    }}
+                  >
+                    Time
+                  </th>
+                  <th
+                    style={{
+                      textAlign: "left",
+                      padding: "0.5rem",
+                      borderBottom: "1px solid #ddd",
+                    }}
+                  >
+                    Status
+                  </th>
+                  <th
+                    style={{
+                      textAlign: "right",
+                      padding: "0.5rem",
+                      borderBottom: "1px solid #ddd",
+                    }}
+                  >
+                    Action
+                  </th>
+                </tr>
               </thead>
               <tbody>
-              {availability.map((slot, index) => {
-                const isAvailable =
-                  String(slot.status).toUpperCase() === "AVAILABLE";
-
-                return (
-                  <tr key={`${slot.startAt}-${slot.endAt}-${index}`}>
-                    <td
-                      style={{
-                        padding: "0.5rem",
-                        borderBottom: "1px solid #eee",
-                      }}
-                    >
-                      {formatTimeRange(slot)}
-                    </td>
-                    <td
-                      style={{
-                        padding: "0.5rem",
-                        borderBottom: "1px solid #eee",
-                        textTransform: "capitalize",
-                      }}
-                    >
-                      {slot.status.toLowerCase()}
-                    </td>
-                    <td
-                      style={{
-                        padding: "0.5rem",
-                        borderBottom: "1px solid #eee",
-                        textAlign: "right",
-                      }}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => handleBookSlot(slot)}
-                        disabled={!isAvailable || bookingMutation.isPending}
-                        style={{
-                          padding: "0.3rem 0.7rem",
-                          cursor:
-                            isAvailable && !bookingMutation.isPending
-                              ? "pointer"
-                              : "not-allowed",
-                        }}
-                      >
-                        {isAvailable ? "Book" : "Unavailable"}
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
+                {availabilitySlots.map((slots, weekIndex) => (
+                  <React.Fragment key={weekIndex}>
+                    {
+                      isRecurring && (
+                        <tr>
+                        <td colSpan={3} style={{ padding: "1rem", textAlign: "center" }}>
+                          Week {weekIndex + 1}
+                        </td>
+                      </tr>
+                      )
+                    }
+                    
+                    {slots.map((slot, index) => {
+                      const isAvailable = String(slot.status).toUpperCase() === "AVAILABLE";
+                      return (
+                        <tr key={`${slot.startAt}-${slot.endAt}-${index}`}>
+                          <td
+                            style={{
+                              padding: "0.5rem",
+                              borderBottom: "1px solid #eee",
+                            }}
+                          >
+                            {formatTimeRange(slot)}
+                          </td>
+                          <td
+                            style={{
+                              padding: "0.5rem",
+                              borderBottom: "1px solid #eee",
+                              textTransform: "capitalize",
+                            }}
+                          >
+                            {slot.status.toLowerCase()}
+                          </td>
+                          <td
+                            style={{
+                              padding: "0.5rem",
+                              borderBottom: "1px solid #eee",
+                              textAlign: "right",
+                            }}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => handleBookSlot(slot)}
+                              disabled={!isAvailable || bookingMutation.isPending || recurringBookingMutation.isPending}
+                              style={{
+                                padding: "0.3rem 0.7rem",
+                                cursor: isAvailable && !bookingMutation.isPending && !recurringBookingMutation.isPending
+                                  ? "pointer"
+                                  : "not-allowed",
+                              }}
+                            >
+                              {isAvailable ? "Book" : "Unavailable"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </React.Fragment>
+                ))}
               </tbody>
             </table>
           </div>
-        )}
-
-        {bookingError && (
-          <p style={{color: "red", marginTop: "0.75rem"}}>{bookingError}</p>
         )}
 
         <div
@@ -328,8 +512,8 @@ export const DeskBookingModal: React.FC<DeskBookingModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            style={{padding: "0.4rem 0.8rem", cursor: "pointer"}}
-            disabled={bookingMutation.isPending}
+            style={{ padding: "0.4rem 0.8rem", cursor: "pointer" }}
+            disabled={bookingMutation.isPending || recurringBookingMutation.isPending}
           >
             Close
           </button>
